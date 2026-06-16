@@ -55,16 +55,23 @@ function getMailer() {
 }
 async function sendEmail(to, subject, html) {
   const from = process.env.EMAIL_FROM || process.env.MAIL_FROM || process.env.SMTP_USER || "noreply@kateknit.com";
+  const provider = (process.env.EMAIL_PROVIDER || "").toLowerCase();
+  const key = process.env.RESEND_API_KEY;
+  // Если выбран Resend (или нет SMTP) и есть ключ — шлём через Resend (домен kateknit.com подтверждён)
+  const useResend = key && (provider === "resend" || !process.env.SMTP_HOST);
+  if (useResend) {
+    const r = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + key, "Content-Type": "application/json" },
+      body: JSON.stringify({ from, to, subject, html })
+    });
+    if (!r.ok) throw new Error("Resend error: " + (await r.text()));
+    return;
+  }
+  // Иначе — через SMTP (Gmail и т.п.)
   const m = getMailer();
   if (m) { await m.sendMail({ from, to, subject, html }); return; }
-  const key = process.env.RESEND_API_KEY;
-  if (!key) throw new Error("Почта не настроена: задайте SMTP_HOST/SMTP_USER/SMTP_PASS или RESEND_API_KEY");
-  const r = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: { "Authorization": "Bearer " + key, "Content-Type": "application/json" },
-    body: JSON.stringify({ from, to, subject, html })
-  });
-  if (!r.ok) throw new Error("Resend error: " + (await r.text()));
+  throw new Error("Почта не настроена: задайте RESEND_API_KEY (+EMAIL_PROVIDER=resend) или SMTP_*");
 }
 init().catch((e) => console.error("DB init error:", e));
 
