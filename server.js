@@ -184,6 +184,8 @@ app.post("/api/lava/webhook", async (req, res) => {
   const status = String(b.status || b.eventType || b.event || (b.data && b.data.status) || "").toLowerCase();
   if (status && !/success|complete|paid|active|subscription/.test(status)) return res.status(200).json({ ok: true, note: "ignored status: " + status });
   const offer = String(b.offerId || b.productId || b.offer_id || (b.product && b.product.id) || (b.data && (b.data.offerId || b.data.productId)) || "");
+  const myOffer = process.env.LAVA_OFFER_ID || "";
+  if (myOffer && offer && offer !== myOffer) return res.status(200).json({ ok: true, note: "other product, ignored" });
   const amount = Number(b.amount || b.sum || b.total || (b.data && b.data.amount) || (b.product && b.product.price) || 0);
   const currency = String(b.currency || b.curr || (b.data && b.data.currency) || "RUB").toUpperCase();
   const yearId = process.env.LAVA_OFFER_YEAR || "", monthId = process.env.LAVA_OFFER_MONTH || "";
