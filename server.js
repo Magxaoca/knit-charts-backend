@@ -4,6 +4,7 @@ const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
+const nodemailer = require("nodemailer");
 const { Pool } = require("pg");
 
 const app = express();
@@ -36,11 +37,28 @@ async function init() {
   console.log("DB ready");
 }
 
-// Отправка письма через Resend (нужен RESEND_API_KEY)
+// Отправка письма. Если заданы SMTP_* — шлём через SMTP (Gmail и т.п.),
+// иначе через Resend (RESEND_API_KEY). Адрес отправителя — EMAIL_FROM / MAIL_FROM / SMTP_USER.
+let mailer = null;
+function getMailer() {
+  if (mailer) return mailer;
+  if (process.env.SMTP_HOST) {
+    const port = Number(process.env.SMTP_PORT || 587);
+    mailer = nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port,
+      secure: port === 465,
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+    });
+  }
+  return mailer;
+}
 async function sendEmail(to, subject, html) {
+  const from = process.env.EMAIL_FROM || process.env.MAIL_FROM || process.env.SMTP_USER || "noreply@kateknit.com";
+  const m = getMailer();
+  if (m) { await m.sendMail({ from, to, subject, html }); return; }
   const key = process.env.RESEND_API_KEY;
-  if (!key) throw new Error("RESEND_API_KEY не задан");
-  const from = process.env.MAIL_FROM || "Схемы <noreply@kateknit.com>";
+  if (!key) throw new Error("Почта не настроена: задайте SMTP_HOST/SMTP_USER/SMTP_PASS или RESEND_API_KEY");
   const r = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: { "Authorization": "Bearer " + key, "Content-Type": "application/json" },
