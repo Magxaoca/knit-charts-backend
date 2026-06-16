@@ -148,6 +148,30 @@ app.get("/api/config", (req, res) => res.json({
   trialDays: TRIAL_DAYS
 }));
 
+// Создание счёта в LavaTop (по API). Только валюта и цена, без выбора метода оплаты.
+app.post("/api/pay", auth, async (req, res) => {
+  const period = req.body.period === "year" ? "year" : "month";
+  const amount = period === "year" ? Number(process.env.AMOUNT_YEAR || 3500) : Number(process.env.AMOUNT_MONTH || 400);
+  const currency = String(req.body.currency || "RUB").toUpperCase();
+  const apiKey = process.env.LAVA_API_KEY, offerId = process.env.LAVA_OFFER_ID;
+  const base = (process.env.LAVA_API_BASE || "https://gate.lava.top").replace(/\/+$/, "");
+  if (!apiKey || !offerId) return res.status(500).json({ error: "Оплата не настроена (нужны LAVA_API_KEY и LAVA_OFFER_ID)" });
+  try {
+    const body = { email: req.user.email, offerId, currency, periodicity: "ONE_TIME", amount, price: amount, buyerLanguage: "RU" };
+    const r = await fetch(base + "/api/v2/invoice", {
+      method: "POST",
+      headers: { "X-Api-Key": apiKey, "Content-Type": "application/json", "Accept": "application/json" },
+      body: JSON.stringify(body)
+    });
+    const j = await r.json().catch(() => ({}));
+    console.log("LAVA invoice:", r.status, JSON.stringify(j));
+    if (!r.ok) return res.status(502).json({ error: "LavaTop: " + (j.error || j.message || ("код " + r.status)) });
+    const url = j.paymentUrl || j.url || j.invoiceUrl || (j.data && (j.data.paymentUrl || j.data.url)) || "";
+    if (!url) return res.status(502).json({ error: "LavaTop не вернул ссылку оплаты (см. логи)" });
+    res.json({ url });
+  } catch (e) { console.error(e); res.status(500).json({ error: "Ошибка создания оплаты" }); }
+});
+
 // Вебхук LavaTop: после оплаты включаем Pro нужному пользователю
 app.post("/api/lava/webhook", async (req, res) => {
   try { console.log("LAVA webhook:", JSON.stringify(req.body)); } catch (e) {}
@@ -157,6 +181,8 @@ app.post("/api/lava/webhook", async (req, res) => {
   if (key && (!got || String(got).replace(/^Bearer\s+/i, "") !== key)) return res.status(401).json({ error: "bad key" });
   const email = norm(b.email || b.buyerEmail || (b.buyer && b.buyer.email) || b.clientEmail || (b.data && b.data.email) || (b.buyer && b.buyer.buyerEmail) || "");
   if (!email) return res.status(200).json({ ok: true, note: "no email in payload" });
+  const status = String(b.status || b.eventType || b.event || (b.data && b.data.status) || "").toLowerCase();
+  if (status && !/success|complete|paid|active|subscription/.test(status)) return res.status(200).json({ ok: true, note: "ignored status: " + status });
   const offer = String(b.offerId || b.productId || b.offer_id || (b.product && b.product.id) || (b.data && (b.data.offerId || b.data.productId)) || "");
   const amount = Number(b.amount || b.sum || b.total || (b.data && b.data.amount) || (b.product && b.product.price) || 0);
   const currency = String(b.currency || b.curr || (b.data && b.data.currency) || "RUB").toUpperCase();
