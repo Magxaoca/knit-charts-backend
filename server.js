@@ -157,10 +157,14 @@ app.post("/api/lava/webhook", async (req, res) => {
   if (key && (!got || String(got).replace(/^Bearer\s+/i, "") !== key)) return res.status(401).json({ error: "bad key" });
   const email = norm(b.email || b.buyerEmail || (b.buyer && b.buyer.email) || b.clientEmail || (b.data && b.data.email) || (b.buyer && b.buyer.buyerEmail) || "");
   if (!email) return res.status(200).json({ ok: true, note: "no email in payload" });
-  const offer = String(b.offerId || b.productId || (b.product && b.product.id) || (b.data && b.data.offerId) || "");
-  const amount = Number(b.amount || b.sum || (b.data && b.data.amount) || (b.product && b.product.price) || 0);
-  const yearId = process.env.LAVA_OFFER_YEAR || "";
-  const days = ((yearId && offer === yearId) || amount >= 2000) ? 365 : 30;
+  const offer = String(b.offerId || b.productId || b.offer_id || (b.product && b.product.id) || (b.data && (b.data.offerId || b.data.productId)) || "");
+  const amount = Number(b.amount || b.sum || b.total || (b.data && b.data.amount) || (b.product && b.product.price) || 0);
+  const currency = String(b.currency || b.curr || (b.data && b.data.currency) || "RUB").toUpperCase();
+  const yearId = process.env.LAVA_OFFER_YEAR || "", monthId = process.env.LAVA_OFFER_MONTH || "";
+  let days = 30;
+  if (yearId && offer === yearId) days = 365;
+  else if (monthId && offer === monthId) days = 30;
+  else { const thr = (currency.includes("USD") || currency.includes("EUR")) ? 20 : 2000; if (amount >= thr) days = 365; }
   try {
     const r = await pool.query("SELECT id, pro_until FROM users WHERE email=$1", [email]);
     if (r.rows.length) {
