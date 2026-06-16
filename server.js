@@ -153,8 +153,8 @@ app.post("/api/pay", auth, async (req, res) => {
   const period = req.body.period === "year" ? "year" : "month";
   const amount = period === "year" ? Number(process.env.AMOUNT_YEAR || 3500) : Number(process.env.AMOUNT_MONTH || 400);
   const currency = String(req.body.currency || "RUB").toUpperCase();
-  const apiKey = process.env.LAVA_API_KEY, offerId = process.env.LAVA_OFFER_ID;
-  const base = (process.env.LAVA_API_BASE || "https://gate.lava.top").replace(/\/+$/, "");
+  const apiKey = process.env.LAVA_API_KEY || process.env.LAVATOP_API_KEY, offerId = process.env.LAVA_OFFER_ID;
+  const base = (process.env.LAVA_API_BASE || process.env.LAVATOP_API_BASE || "https://gate.lava.top").replace(/\/+$/, "");
   if (!apiKey || !offerId) return res.status(500).json({ error: "Оплата не настроена (нужны LAVA_API_KEY и LAVA_OFFER_ID)" });
   try {
     const body = { email: req.user.email, offerId, currency, periodicity: "ONE_TIME", amount, price: amount, buyerLanguage: "RU" };
@@ -175,7 +175,7 @@ app.post("/api/pay", auth, async (req, res) => {
 // Вебхук LavaTop: после оплаты включаем Pro нужному пользователю
 app.post("/api/lava/webhook", async (req, res) => {
   try { console.log("LAVA webhook:", JSON.stringify(req.body)); } catch (e) {}
-  const key = process.env.LAVA_WEBHOOK_KEY;
+  const key = process.env.LAVA_WEBHOOK_KEY || process.env.LAVATOP_WEBHOOK_KEY;
   const b = req.body || {};
   const got = req.headers["x-api-key"] || req.headers["authorization"] || b.webhookKey || b.secret || b.apiKey;
   if (key && (!got || String(got).replace(/^Bearer\s+/i, "") !== key)) return res.status(401).json({ error: "bad key" });
