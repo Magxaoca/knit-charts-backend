@@ -10,6 +10,7 @@ const { Pool } = require("pg");
 const app = express();
 app.use(cors());                       // разрешаем запросы с фронта (Vercel)
 app.use(express.json({ limit: "8mb" }));
+app.use(express.urlencoded({ extended: true, limit: "8mb" }));
 
 const JWT_SECRET = process.env.JWT_SECRET || "please-change-this-secret";
 const pool = new Pool({
@@ -34,7 +35,22 @@ async function init() {
   )`);
   await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token TEXT");
   await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_expires BIGINT");
+  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS trial_ends BIGINT");
+  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS pro_until BIGINT");
+  // выдать пробный период тем, у кого его ещё нет (старые аккаунты)
+  await pool.query("UPDATE users SET trial_ends=$1 WHERE trial_ends IS NULL AND pro_until IS NULL", [Date.now() + Number(process.env.TRIAL_DAYS || 3) * 86400 * 1000]);
   console.log("DB ready");
+}
+
+const TRIAL_DAYS = Number(process.env.TRIAL_DAYS || 3);
+const DAY = 86400 * 1000;
+function accessInfo(u) {
+  const now = Date.now();
+  const proUntil = Number(u.pro_until || 0);
+  const trialEnds = Number(u.trial_ends || 0);
+  const pro = proUntil > now;
+  const trialActive = trialEnds > now;
+  return { pro, proUntil, trialEnds, trialActive, access: pro || trialActive };
 }
 
 // Отправка письма. Если заданы SMTP_* — шлём через SMTP (Gmail и т.п.),
@@ -93,7 +109,8 @@ app.post("/api/register", async (req, res) => {
     return res.status(400).json({ error: "Введите email и пароль (минимум 6 символов)" });
   try {
     const hash = await bcrypt.hash(password, 10);
-    const r = await pool.query("INSERT INTO users(email,password_hash) VALUES($1,$2) RETURNING id,email", [email, hash]);
+    const trialEnds = Date.now() + TRIAL_DAYS * DAY;
+    const r = await pool.query("INSERT INTO users(email,password_hash,trial_ends) VALUES($1,$2,$3) RETURNING id,email", [email, hash, trialEnds]);
     const u = r.rows[0];
     res.json({ token: tokenFor(u), email: u.email });
   } catch (e) {
@@ -114,7 +131,45 @@ app.post("/api/login", async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: "Ошибка сервера" }); }
 });
 
-app.get("/api/me", auth, (req, res) => res.json({ email: req.user.email }));
+app.get("/api/me", auth, async (req, res) => {
+  try {
+    const r = await pool.query("SELECT email, pro_until, trial_ends FROM users WHERE id=$1", [req.user.id]);
+    if (!r.rows.length) return res.status(404).json({ error: "Пользователь не найден" });
+    res.json(Object.assign({ email: r.rows[0].email }, accessInfo(r.rows[0])));
+  } catch (e) { console.error(e); res.status(500).json({ error: "Ошибка сервера" }); }
+});
+
+// Ссылки на оплату (публичные страницы офферов LavaTop) и длина пробного
+app.get("/api/config", (req, res) => res.json({
+  payMonth: process.env.LAVA_URL_MONTH || "",
+  payYear: process.env.LAVA_URL_YEAR || "",
+  priceMonth: process.env.PRICE_MONTH || "400 ₽",
+  priceYear: process.env.PRICE_YEAR || "3500 ₽",
+  trialDays: TRIAL_DAYS
+}));
+
+// Вебхук LavaTop: после оплаты включаем Pro нужному пользователю
+app.post("/api/lava/webhook", async (req, res) => {
+  try { console.log("LAVA webhook:", JSON.stringify(req.body)); } catch (e) {}
+  const key = process.env.LAVA_WEBHOOK_KEY;
+  const b = req.body || {};
+  const got = req.headers["x-api-key"] || req.headers["authorization"] || b.webhookKey || b.secret || b.apiKey;
+  if (key && (!got || String(got).replace(/^Bearer\s+/i, "") !== key)) return res.status(401).json({ error: "bad key" });
+  const email = norm(b.email || b.buyerEmail || (b.buyer && b.buyer.email) || b.clientEmail || (b.data && b.data.email) || (b.buyer && b.buyer.buyerEmail) || "");
+  if (!email) return res.status(200).json({ ok: true, note: "no email in payload" });
+  const offer = String(b.offerId || b.productId || (b.product && b.product.id) || (b.data && b.data.offerId) || "");
+  const amount = Number(b.amount || b.sum || (b.data && b.data.amount) || (b.product && b.product.price) || 0);
+  const yearId = process.env.LAVA_OFFER_YEAR || "";
+  const days = ((yearId && offer === yearId) || amount >= 2000) ? 365 : 30;
+  try {
+    const r = await pool.query("SELECT id, pro_until FROM users WHERE email=$1", [email]);
+    if (r.rows.length) {
+      const base = Math.max(Date.now(), Number(r.rows[0].pro_until || 0));
+      await pool.query("UPDATE users SET pro_until=$1 WHERE id=$2", [base + days * DAY, r.rows[0].id]);
+    }
+    res.json({ ok: true });
+  } catch (e) { console.error(e); res.status(500).json({ error: "Ошибка сервера" }); }
+});
 
 // Запрос восстановления пароля — отправляем письмо со ссылкой
 app.post("/api/forgot", async (req, res) => {
