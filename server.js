@@ -161,8 +161,8 @@ app.post("/api/pay", auth, async (req, res) => {
   if (!apiKey || !offerId) return res.status(500).json({ error: "Оплата не настроена (нужны LAVA_API_KEY и LAVA_OFFER_MONTH/LAVA_OFFER_YEAR)" });
   try {
     // По схеме LavaTop (InvoiceRequestDto) поля amount/price отсутствуют — цена в оффере
-    const body = { email: req.user.email, offerId, currency, periodicity: "ONE_TIME", buyerLanguage: "RU" };
-    const r = await fetch(base + "/api/v2/invoice", {
+    const PRICES = { month: { RUB: 400, USD: 5, EUR: 5 }, year: { RUB: 3500, USD: 39, EUR: 39 } }; const amount = (PRICES[period] && PRICES[period][currency]) || 0; const body = { email: req.user.email, offerId, currency, amount, periodicity: "ONE_TIME", buyerLanguage: "RU" };
+    const r = await fetch(base + "/api/v3/invoice", {
       method: "POST",
       headers: { "X-Api-Key": apiKey, "Content-Type": "application/json", "Accept": "application/json" },
       body: JSON.stringify(body)
