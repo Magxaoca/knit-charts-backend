@@ -178,16 +178,13 @@ app.post("/api/pay", auth, async (req, res) => {
       return res.status(422).json({ error: "В аккаунте указан некорректный email. Войдите с обычным email вида name@example.com или создайте новый аккаунт." });
     if (accessInfo(accessRow.rows[0]).pro)
       return res.status(409).json({ error: "У вас уже активирован Pro-доступ" });
-    // LavaTop /api/v3/invoice для подписки: email, offerId, currency, periodicity.
-    // Цена берётся из оффера в LavaTop; на сайте показываем 250 ₽ / $5 / €5.
-    const body = { email: buyerEmail, offerId, currency, periodicity: "MONTHLY", buyerLanguage: "RU" };
-    const provider = process.env["LAVA_PAYMENT_PROVIDER_" + currency] || (currency === "RUB" ? "SMART_GLOCAL" : "");
+    // Текущий LavaTop-оффер — динамическая разовая покупка месяца доступа.
+    // Реальная проверка API: для него нужен amount, а рекуррентный период не разрешён.
+    const body = { email: buyerEmail, offerId, currency, amount: currency === "RUB" ? 250 : 5, buyerLanguage: "RU" };
+    const provider = process.env["LAVA_PAYMENT_PROVIDER_" + currency] || "";
     const method = process.env["LAVA_PAYMENT_METHOD_" + currency] || "";
     if (provider) body.paymentProvider = provider;
     if (method) body.paymentMethod = method;
-    if (String(process.env.LAVA_SEND_AMOUNT || "").toLowerCase() === "true") {
-      body.amount = currency === "RUB" ? 250 : 5;
-    }
     const r = await fetch(base + "/api/v3/invoice", {
       method: "POST",
       headers: { "X-Api-Key": apiKey, "Content-Type": "application/json", "Accept": "application/json" },
@@ -200,8 +197,10 @@ app.post("/api/pay", auth, async (req, res) => {
       console.error("LAVA invoice error", r.status, JSON.stringify(j), "buyerEmail=" + buyerEmail, "currency=" + currency, "offerId=" + offerId);
       if (r.status === 400 && /email/i.test(lavaError))
         return res.status(422).json({ error: "LavaTop не принял email аккаунта: " + buyerEmail + ". Попробуйте выйти и войти заново. Если повторится — зарегистрируйтесь с другим обычным email." });
+      if (r.status === 400 && /period/i.test(lavaError))
+        return res.status(502).json({ error: "LavaTop не принимает период подписки для этого оффера. На сайте используется разовая оплата месяца; если видите это сообщение, обновите страницу и попробуйте снова." });
       if (r.status === 400 && /invoice cannot be created|cannot be created/i.test(lavaError))
-        return res.status(502).json({ error: "LavaTop не смог создать счёт для этого оффера. Проверьте в LavaTop, что LAVA_OFFER_MONTH — это активный месячный оффер подписки, а цена задана 250 ₽ / $5 / €5." });
+        return res.status(502).json({ error: "LavaTop не смог создать счёт для этого оффера. Проверьте, что LAVA_OFFER_MONTH — активный оффер с динамической ценой." });
       return res.status(502).json({ error: "LavaTop: " + lavaError });
     }
     const url = j.paymentUrl || j.url || j.invoiceUrl || (j.data && (j.data.paymentUrl || j.data.url)) || "";
