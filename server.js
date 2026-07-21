@@ -150,24 +150,26 @@ app.get("/api/me", auth, async (req, res) => {
 // Ссылки на оплату (публичные страницы офферов LavaTop) и длина пробного
 app.get("/api/config", (req, res) => res.json({
   payMonth: process.env.LAVA_URL_MONTH || "",
-  payYear: process.env.LAVA_URL_YEAR || "",
-  priceMonth: process.env.PRICE_MONTH || "400 ₽",
-  priceYear: process.env.PRICE_YEAR || "3500 ₽",
+  priceMonth: process.env.PRICE_MONTH || process.env.PRICE_MONTH_RUB || "250 ₽",
+  priceRub: process.env.PRICE_MONTH_RUB || process.env.PRICE_MONTH || "250 ₽",
+  priceUsd: process.env.PRICE_MONTH_USD || "$5",
+  priceEur: process.env.PRICE_MONTH_EUR || "€5",
   trialDays: TRIAL_DAYS
 }));
 
-// Создание счёта в LavaTop (по API). Только валюта и цена, без выбора метода оплаты.
+// Создание счёта в LavaTop (по API). Только месячный Pro: 250 ₽ / $5 / €5.
 app.post("/api/pay", auth, async (req, res) => {
-  const period = req.body.period === "year" ? "year" : "month";
   const requestedCurrency = String(req.body.currency || "RUB").toUpperCase();
   const currency = ["RUB", "USD", "EUR"].includes(requestedCurrency) ? requestedCurrency : "RUB";
   const apiKey = process.env.LAVA_API_KEY || process.env.LAVATOP_API_KEY;
-  // offerId = «идентификатор цены» оффера в LavaTop (цена берётся из оффера, в запросе суммы НЕТ)
-  const offerId = period === "year"
-    ? (process.env.LAVA_OFFER_YEAR || process.env.LAVA_OFFER_ID)
-    : (process.env.LAVA_OFFER_MONTH || process.env.LAVA_OFFER_ID);
+  // offerId = «идентификатор цены» оффера в LavaTop.
+  // Можно задать отдельные офферы по валютам; иначе используется общий месячный.
+  const offerId = process.env["LAVA_OFFER_MONTH_" + currency]
+    || process.env["LAVA_OFFER_" + currency]
+    || process.env.LAVA_OFFER_MONTH
+    || process.env.LAVA_OFFER_ID;
   const base = (process.env.LAVA_API_BASE || process.env.LAVATOP_API_BASE || "https://gate.lava.top").replace(/\/+$/, "");
-  if (!apiKey || !offerId) return res.status(500).json({ error: "Оплата не настроена (нужны LAVA_API_KEY и LAVA_OFFER_MONTH/LAVA_OFFER_YEAR)" });
+  if (!apiKey || !offerId) return res.status(500).json({ error: "Оплата не настроена (нужны LAVA_API_KEY и LAVA_OFFER_MONTH)" });
   try {
     const accessRow = await pool.query("SELECT email, pro_until, trial_ends FROM users WHERE id=$1", [req.user.id]);
     if (!accessRow.rows.length) return res.status(401).json({ error: "Сессия истекла, войдите снова" });
@@ -176,9 +178,16 @@ app.post("/api/pay", auth, async (req, res) => {
       return res.status(422).json({ error: "В аккаунте указан некорректный email. Войдите с обычным email вида name@example.com или создайте новый аккаунт." });
     if (accessInfo(accessRow.rows[0]).pro)
       return res.status(409).json({ error: "У вас уже активирован Pro-доступ" });
-    // LavaTop /api/v3/invoice: минимально и стабильно — email, offerId, currency.
-    // Цена берётся из оффера; amount передаётся только для товаров с динамической ценой.
-    const body = { email: buyerEmail, offerId, currency, buyerLanguage: "RU" };
+    // LavaTop /api/v3/invoice для подписки: email, offerId, currency, periodicity.
+    // Цена берётся из оффера в LavaTop; на сайте показываем 250 ₽ / $5 / €5.
+    const body = { email: buyerEmail, offerId, currency, periodicity: "MONTHLY", buyerLanguage: "RU" };
+    const provider = process.env["LAVA_PAYMENT_PROVIDER_" + currency] || (currency === "RUB" ? "SMART_GLOCAL" : "");
+    const method = process.env["LAVA_PAYMENT_METHOD_" + currency] || "";
+    if (provider) body.paymentProvider = provider;
+    if (method) body.paymentMethod = method;
+    if (String(process.env.LAVA_SEND_AMOUNT || "").toLowerCase() === "true") {
+      body.amount = currency === "RUB" ? 250 : 5;
+    }
     const r = await fetch(base + "/api/v3/invoice", {
       method: "POST",
       headers: { "X-Api-Key": apiKey, "Content-Type": "application/json", "Accept": "application/json" },
@@ -188,9 +197,11 @@ app.post("/api/pay", auth, async (req, res) => {
     console.log("LAVA invoice:", r.status, JSON.stringify(j));
     if (!r.ok) {
       const lavaError = String(j.error || j.message || ("код " + r.status));
-      console.error("LAVA invoice error", r.status, JSON.stringify(j), "buyerEmail=" + buyerEmail, "period=" + period, "currency=" + currency);
+      console.error("LAVA invoice error", r.status, JSON.stringify(j), "buyerEmail=" + buyerEmail, "currency=" + currency, "offerId=" + offerId);
       if (r.status === 400 && /email/i.test(lavaError))
         return res.status(422).json({ error: "LavaTop не принял email аккаунта: " + buyerEmail + ". Попробуйте выйти и войти заново. Если повторится — зарегистрируйтесь с другим обычным email." });
+      if (r.status === 400 && /invoice cannot be created|cannot be created/i.test(lavaError))
+        return res.status(502).json({ error: "LavaTop не смог создать счёт для этого оффера. Проверьте в LavaTop, что LAVA_OFFER_MONTH — это активный месячный оффер подписки, а цена задана 250 ₽ / $5 / €5." });
       return res.status(502).json({ error: "LavaTop: " + lavaError });
     }
     const url = j.paymentUrl || j.url || j.invoiceUrl || (j.data && (j.data.paymentUrl || j.data.url)) || "";
@@ -217,15 +228,18 @@ app.post("/api/lava/webhook", async (req, res) => {
   const status = String(b.status || b.eventType || b.event || (b.data && b.data.status) || "").toLowerCase();
   if (status && !/success|complete|paid|active|subscription/.test(status)) return res.status(200).json({ ok: true, note: "ignored status: " + status });
   const offer = String(b.offerId || b.productId || b.offer_id || (b.product && b.product.id) || (b.data && (b.data.offerId || b.data.productId)) || "");
-  const mine = [process.env.LAVA_OFFER_ID, process.env.LAVA_OFFER_MONTH, process.env.LAVA_OFFER_YEAR].filter(Boolean);
+  const mine = [
+    process.env.LAVA_OFFER_ID,
+    process.env.LAVA_OFFER_MONTH,
+    process.env.LAVA_OFFER_MONTH_RUB,
+    process.env.LAVA_OFFER_MONTH_USD,
+    process.env.LAVA_OFFER_MONTH_EUR,
+    process.env.LAVA_OFFER_RUB,
+    process.env.LAVA_OFFER_USD,
+    process.env.LAVA_OFFER_EUR
+  ].filter(Boolean);
   if (mine.length && offer && !mine.includes(offer)) return res.status(200).json({ ok: true, note: "other product, ignored" });
-  const amount = Number(b.amount || b.sum || b.total || (b.data && b.data.amount) || (b.product && b.product.price) || 0);
-  const currency = String(b.currency || b.curr || (b.data && b.data.currency) || "RUB").toUpperCase();
-  const yearId = process.env.LAVA_OFFER_YEAR || "", monthId = process.env.LAVA_OFFER_MONTH || "";
-  let days = 30;
-  if (yearId && offer === yearId) days = 365;
-  else if (monthId && offer === monthId) days = 30;
-  else { const thr = (currency.includes("USD") || currency.includes("EUR")) ? 20 : 2000; if (amount >= thr) days = 365; }
+  const days = 30;
   try {
     const r = await pool.query("SELECT id, pro_until FROM users WHERE email=$1", [email]);
     if (r.rows.length) {
