@@ -99,14 +99,21 @@ function auth(req, res, next) {
   catch (e) { res.status(401).json({ error: "Сессия истекла, войдите снова" }); }
 }
 const norm = (e) => String(e || "").trim().toLowerCase();
+const isValidEmail = (e) => {
+  const email = norm(e);
+  return email.length >= 6
+    && email.length <= 254
+    && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)
+    && !/[<>"'(),;:\\[\]]/.test(email);
+};
 const tokenFor = (u) => jwt.sign({ id: u.id, email: u.email }, JWT_SECRET, { expiresIn: "60d" });
 
 app.get("/health", (req, res) => res.json({ ok: true }));
 
 app.post("/api/register", async (req, res) => {
   const email = norm(req.body.email), password = String(req.body.password || "");
-  if (!email || !email.includes("@") || password.length < 6)
-    return res.status(400).json({ error: "Введите email и пароль (минимум 6 символов)" });
+  if (!isValidEmail(email) || password.length < 6)
+    return res.status(400).json({ error: "Введите корректный email и пароль (минимум 6 символов)" });
   try {
     const hash = await bcrypt.hash(password, 10);
     const trialEnds = Date.now() + TRIAL_DAYS * DAY;
@@ -121,6 +128,7 @@ app.post("/api/register", async (req, res) => {
 
 app.post("/api/login", async (req, res) => {
   const email = norm(req.body.email), password = String(req.body.password || "");
+  if (!isValidEmail(email)) return res.status(400).json({ error: "Введите корректный email" });
   try {
     const r = await pool.query("SELECT * FROM users WHERE email=$1", [email]);
     if (!r.rows.length) return res.status(401).json({ error: "Неверный email или пароль" });
@@ -151,7 +159,8 @@ app.get("/api/config", (req, res) => res.json({
 // Создание счёта в LavaTop (по API). Только валюта и цена, без выбора метода оплаты.
 app.post("/api/pay", auth, async (req, res) => {
   const period = req.body.period === "year" ? "year" : "month";
-  const currency = String(req.body.currency || "RUB").toUpperCase();
+  const requestedCurrency = String(req.body.currency || "RUB").toUpperCase();
+  const currency = ["RUB", "USD", "EUR"].includes(requestedCurrency) ? requestedCurrency : "RUB";
   const apiKey = process.env.LAVA_API_KEY || process.env.LAVATOP_API_KEY;
   // offerId = «идентификатор цены» оффера в LavaTop (цена берётся из оффера, в запросе суммы НЕТ)
   const offerId = period === "year"
@@ -160,11 +169,16 @@ app.post("/api/pay", auth, async (req, res) => {
   const base = (process.env.LAVA_API_BASE || process.env.LAVATOP_API_BASE || "https://gate.lava.top").replace(/\/+$/, "");
   if (!apiKey || !offerId) return res.status(500).json({ error: "Оплата не настроена (нужны LAVA_API_KEY и LAVA_OFFER_MONTH/LAVA_OFFER_YEAR)" });
   try {
-    const accessRow = await pool.query("SELECT pro_until, trial_ends FROM users WHERE id=$1", [req.user.id]);
-    if (accessRow.rows.length && accessInfo(accessRow.rows[0]).pro)
+    const accessRow = await pool.query("SELECT email, pro_until, trial_ends FROM users WHERE id=$1", [req.user.id]);
+    if (!accessRow.rows.length) return res.status(401).json({ error: "Сессия истекла, войдите снова" });
+    const buyerEmail = norm(accessRow.rows[0].email);
+    if (!isValidEmail(buyerEmail))
+      return res.status(422).json({ error: "В аккаунте указан некорректный email. Войдите с обычным email вида name@example.com или создайте новый аккаунт." });
+    if (accessInfo(accessRow.rows[0]).pro)
       return res.status(409).json({ error: "У вас уже активирован Pro-доступ" });
-    // По схеме LavaTop (InvoiceRequestDto) поля amount/price отсутствуют — цена в оффере
-    const PRICES = { month: { RUB: 400, USD: 5, EUR: 5 }, year: { RUB: 3500, USD: 39, EUR: 39 } }; const amount = (PRICES[period] && PRICES[period][currency]) || 0; const body = { email: req.user.email, offerId, currency, amount, periodicity: "ONE_TIME", buyerLanguage: "RU" };
+    // LavaTop /api/v3/invoice: минимально и стабильно — email, offerId, currency.
+    // Цена берётся из оффера; amount передаётся только для товаров с динамической ценой.
+    const body = { email: buyerEmail, offerId, currency, buyerLanguage: "RU" };
     const r = await fetch(base + "/api/v3/invoice", {
       method: "POST",
       headers: { "X-Api-Key": apiKey, "Content-Type": "application/json", "Accept": "application/json" },
@@ -172,11 +186,23 @@ app.post("/api/pay", auth, async (req, res) => {
     });
     const j = await r.json().catch(() => ({}));
     console.log("LAVA invoice:", r.status, JSON.stringify(j));
-    if (!r.ok) return res.status(502).json({ error: "LavaTop: " + (j.error || j.message || ("код " + r.status)) });
+    if (!r.ok) {
+      const lavaError = String(j.error || j.message || ("код " + r.status));
+      console.error("LAVA invoice error", r.status, JSON.stringify(j), "buyerEmail=" + buyerEmail, "period=" + period, "currency=" + currency);
+      if (r.status === 400 && /email/i.test(lavaError))
+        return res.status(422).json({ error: "LavaTop не принял email аккаунта: " + buyerEmail + ". Попробуйте выйти и войти заново. Если повторится — зарегистрируйтесь с другим обычным email." });
+      return res.status(502).json({ error: "LavaTop: " + lavaError });
+    }
     const url = j.paymentUrl || j.url || j.invoiceUrl || (j.data && (j.data.paymentUrl || j.data.url)) || "";
     if (!url) return res.status(502).json({ error: "LavaTop не вернул ссылку оплаты (см. логи)" });
     res.json({ url });
-  } catch (e) { console.error(e); res.status(500).json({ error: "Ошибка создания оплаты" }); }
+  } catch (e) {
+    console.error(e);
+    const code = e && e.cause && e.cause.code;
+    if (code === "UND_ERR_CONNECT_TIMEOUT")
+      return res.status(503).json({ error: "Платёжный сервис временно не отвечает. Попробуйте ещё раз через пару минут." });
+    res.status(500).json({ error: "Ошибка создания оплаты" });
+  }
 });
 
 // Вебхук LavaTop: после оплаты включаем Pro нужному пользователю
