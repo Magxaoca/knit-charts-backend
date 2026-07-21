@@ -150,8 +150,8 @@ app.get("/api/me", auth, async (req, res) => {
 // Ссылки на оплату (публичные страницы офферов LavaTop) и длина пробного
 app.get("/api/config", (req, res) => res.json({
   payMonth: process.env.LAVA_URL_MONTH || "",
-  priceMonth: process.env.PRICE_MONTH || process.env.PRICE_MONTH_RUB || "250 ₽",
-  priceRub: process.env.PRICE_MONTH_RUB || process.env.PRICE_MONTH || "250 ₽",
+  priceMonth: process.env.PRICE_MONTH_RUB || "250 ₽",
+  priceRub: process.env.PRICE_MONTH_RUB || "250 ₽",
   priceUsd: process.env.PRICE_MONTH_USD || "$5",
   priceEur: process.env.PRICE_MONTH_EUR || "€5",
   trialDays: TRIAL_DAYS
